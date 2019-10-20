@@ -1,0 +1,11 @@
+B _build/x86
+B _build/util
+B _build/llprograms
+B _build/ll
+B _build
+
+S x86
+S util
+S llprograms
+S ll
+S .
