@@ -23,6 +23,31 @@ let compile_cnd = function
   | Ll.Sge -> X86.Ge
 
 
+(* Generate a function that can generate stack_offset *)
+let stack_offset () =
+  let i = ref 0L in
+  fun () ->
+     i := Int64.sub !i 8L;
+    !i
+  
+(* Generate names for alloca *)    
+let org_name = "a"
+let alloca_name_ = ref (org_name ^ "0")
+
+let alloca_name () = 
+  let len = String.length !alloca_name_ in
+  let num = String.sub !alloca_name_ 1 (len - 1) in
+  let num = int_of_string num in
+  let num = num + 1 in
+  let num = string_of_int num in
+  alloca_name_ := org_name ^ num;
+  !alloca_name_
+
+let clear_alloca () =
+  alloca_name_ := org_name ^ "0"
+
+
+let exit_lable = ".exit"
 
 (* locals and layout -------------------------------------------------------- *)
 
@@ -90,8 +115,17 @@ let lookup m x = List.assoc x m
    destination (usually a register).  
 *)
 let compile_operand ctxt dest : Ll.operand -> ins =
-  function _ -> failwith "compile_operand unimplemented"
-
+  function o ->
+    begin match o with
+      | Null -> (Movq, [Imm (Lit 0L); Reg dest])
+      | Const c -> (Movq, [Imm (Lit c); Reg dest])
+      | Gid g -> 
+          let g = Platform.mangle g in
+          (Leaq, [Imm (Lbl g); Reg dest])
+      | Id i ->
+          let i = lookup ctxt.layout i in
+          (Movq, [i; Reg dest])
+    end
 
 
 (* compiling call  ---------------------------------------------------------- *)
@@ -113,7 +147,6 @@ let compile_operand ctxt dest : Ll.operand -> ins =
    [ NOTE: Don't forget to preserve caller-save registers (only if
    needed). ]
 *)
-
 
 
 
@@ -140,8 +173,19 @@ let compile_operand ctxt dest : Ll.operand -> ins =
      Your function should simply return 0 in those cases
 *)
 let rec size_ty tdecls t : int =
-failwith "size_ty not implemented"
-
+  function o ->
+    begin match o with
+      | Null -> 
+          (Movq, [Imm (Lit 0L); Reg dest])
+      | Const c -> 
+          (Movq, [Imm (Lit c); Reg dest])
+      | Gid g -> 
+          let g = Platform.mangle g in
+          (Leaq, [Imm (Lbl g); Reg dest])
+      | Id i ->
+          let i = lookup ctxt.layout i in
+          (Movq, [i; Reg dest])
+    end
 
 
 
@@ -171,8 +215,19 @@ failwith "size_ty not implemented"
       by the path so far
 *)
 let compile_gep ctxt (op : Ll.ty * Ll.operand) (path: Ll.operand list) : ins list =
-failwith "compile_gep not implemented"
-
+  function o ->
+    begin match o with
+      | Null -> 
+          (Movq, [Imm (Lit 0L); Reg dest])
+      | Const c -> 
+          (Movq, [Imm (Lit c); Reg dest])
+      | Gid g -> 
+          let g = Platform.mangle g in
+          (Leaq, [Imm (Lbl g); Reg dest])
+      | Id i ->
+          let i = lookup ctxt.layout i in
+          (Movq, [i; Reg dest])
+    end
 
 
 (* compiling instructions  -------------------------------------------------- *)
@@ -199,8 +254,19 @@ failwith "compile_gep not implemented"
    - Bitcast: does nothing interesting at the assembly level
 *)
 let compile_insn ctxt (uid, i) : X86.ins list =
-      failwith "compile_insn not implemented"
-
+  function o ->
+    begin match o with
+      | Null -> 
+          (Movq, [Imm (Lit 0L); Reg dest])
+      | Const c -> 
+          (Movq, [Imm (Lit c); Reg dest])
+      | Gid g -> 
+          let g = Platform.mangle g in
+          (Leaq, [Imm (Lbl g); Reg dest])
+      | Id i ->
+          let i = lookup ctxt.layout i in
+          (Movq, [i; Reg dest])
+    end
 
 
 (* compiling terminators  --------------------------------------------------- *)
@@ -216,14 +282,34 @@ let compile_insn ctxt (uid, i) : X86.ins list =
    - Cbr branch should treat its operand as a boolean conditional
 *)
 let compile_terminator ctxt t =
-  failwith "compile_terminator not implemented"
+  match t with
+    | Ret (Void, _) -> [(Jmp, [Imm (Lbl exit_lable)])]
 
+    | Ret (t, o) -> 
+        let o = match o with 
+          | None -> raise Exit
+          | Some a -> a
+        in
+        let b = (compile_operand ctxt Rax) o in
+        [b; (Jmp, [Imm (Lbl exit_lable)])]
+
+    | Br b -> [(Jmp, [Imm (Lbl b)])]
+
+    | Cbr (op, t, e) -> 
+        let b1 = op |> compile_operand ctxt Rax  in
+        let b2 = (Cmpq, [Imm (Lit 1L); Reg Rax]) in
+        let b3 = (J Neq, [Imm (Lbl e)]) in
+        [b1; b2; b3]
 
 (* compiling blocks --------------------------------------------------------- *)
 
 (* We have left this helper function here for you to complete. *)
 let compile_block ctxt blk : ins list =
-  failwith "compile_block not implemented"
+  let comp_insn = compile_insn ctxt in
+  let inss = List.map comp_insn blk.insns in
+  let inss = List.flatten inss in
+  inss @ compile_terminator ctxt (snd (blk.term))
+
 
 let compile_lbl_block lbl ctxt blk : elem =
   Asm.text lbl (compile_block ctxt blk)
@@ -241,7 +327,14 @@ let compile_lbl_block lbl ctxt blk : elem =
    [ NOTE: the first six arguments are numbered 0 .. 5 ]
 *)
 let arg_loc (n : int) : operand =
-failwith "arg_loc not implemented"
+  match n + 1 with
+    | 1 -> Reg Rdi
+    | 2 -> Reg Rsi
+    | 3 -> Reg Rdx
+    | 4 -> Reg Rcx
+    | 5 -> Reg R08
+    | 6 -> Reg R09
+    | _ -> Ind3 (Lit (Int64.of_int (8 + 8 * (n - 6))) , Rbp)
 
 
 (* We suggest that you create a helper function that computes the 
@@ -254,7 +347,28 @@ failwith "arg_loc not implemented"
 
 *)
 let stack_layout args (block, lbled_blocks) : layout =
-failwith "stack_layout not implemented"
+  let gen_off = stack_offset () in
+  let gen_off_operand uid = (uid, Ind3 (Lit (gen_off ()), Rbp)) in
+  let args_offs = List.map gen_off_operand args in
+  let t2 acc i =
+    let uid = fst i in
+    let ins = snd i in
+    match ins with
+      | Store _  -> acc
+      | Call (Void, _, _) -> acc
+      | Alloca _ -> 
+          let x1 = [gen_off_operand (alloca_name ())] in
+          let x2 = [gen_off_operand uid] in
+          acc @ x1 @ x2
+      | _ -> 
+          let t1 = [gen_off_operand (alloca_name ())] in
+          acc @ t1
+  in
+  let t3 b = List.fold_left t2 [] b.insns in
+  let blocks = block :: (List.map snd lbled_blocks) in
+  let blocks_offs = List.map t3 blocks |> List.flatten in
+  args_offs @ blocks_offs
+
 
 (* The code for the entry-point of a function must do several things:
 
@@ -272,8 +386,62 @@ failwith "stack_layout not implemented"
    - the function entry code should allocate the stack storage needed
      to hold all of the local stack slots.
 *)
+let emit (i: ins list ref) (b: ins) = 
+  i := !i @ [b]
+  
+let emits (i: ins list ref) (b: ins list) = 
+  i := !i @ b
+
 let compile_fdecl tdecls name { f_ty; f_param; f_cfg } =
-failwith "compile_fdecl unimplemented"
+  clear_alloca ();
+  let layout = stack_layout f_param f_cfg in
+  let stack_len = 8 * List.length layout in
+  let ins = ref [] in
+
+  emit ins (Pushq, [Reg Rbp]);            (* pushq %rbp *)
+  emit ins (Movq, [Reg Rsp; Reg Rbp]);    (* movq  $rsp, %rbp *)
+  emit ins (Pushq, [Reg Rbx]);            (* push callee-save register *)
+  emit ins (Subq, [Imm (Lit (Int64.of_int (stack_len))); Reg Rsp]);    (* Subq $xx, %rsp *)
+
+  (* save parameters to stack frame *)
+  let t1 idx name = 
+    let param_loc = arg_loc idx in
+    let cur_frame_loc = List.assoc name layout in
+
+    match param_loc with
+      | Reg r -> emit ins (Movq, [param_loc; cur_frame_loc])
+      | _ -> 
+          emit ins (Movq, [param_loc; Reg Rax]);
+          emit ins (Movq, [Reg Rax; cur_frame_loc])
+
+  in
+  List.iteri t1 f_param;
+
+  (* compile entry block *)
+  clear_alloca ();  
+  let entry = fst f_cfg in
+  let i = compile_block {tdecls ; layout} entry in     
+  emits ins i;
+  let entry_elem = [{lbl = name; global = true; asm = (Text !ins);}] in
+  ins := [];
+
+  (* compile other blocks *)
+  let other_blocks = snd f_cfg in
+  let t2 (l: lbl * block): elem = 
+    compile_lbl_block (fst l) {tdecls ; layout} other_blocks
+  in
+  let elems = List.map t2 other_blocks in
+
+  (* exit *)
+  emit ins (Addq, [Imm (Lit (Int64.of_int stack_len)); Reg Rsp]);
+  emit ins (Popq, [Reg Rbx]); 
+  emit ins (Popq, [Reg Rbp]);
+  emit ins (Retq, []);
+
+  let exit_elem = [{lbl = exit_lable; global = false; asm = (Text !ins);}] in
+
+  entry_elem @ elems @ exit_elem
+;;
 
 
 
