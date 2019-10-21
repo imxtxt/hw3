@@ -137,7 +137,7 @@ let compile_operand ctxt dest : Ll.operand -> ins =
         (Movq, [Imm (Lit c); Reg dest])
     | Gid g -> 
         let g = Platform.mangle g in
-        (Leaq, [Ind3 (Lbl g, Rsp); Reg dest])
+        (Leaq, [Ind3 (Lbl g, Rip); Reg dest])
     | Id i ->
         let i = lookup ctxt.layout i in
         (Movq, [i; Reg dest])
@@ -252,8 +252,8 @@ let compile_insn ctxt (uid, i) : X86.ins list =
   begin match i with
     | Binop (bop, ty, src, dest) ->
         let i1 = (compile_operand ctxt Rbx) src in
-        let i2 = (compile_operand ctxt Rax) dest in
-        let i3 = (x86_op_by_ll_op bop, [Reg Rax; Reg Rbx]) in
+        let i2 = (compile_operand ctxt Rcx) dest in
+        let i3 = (x86_op_by_ll_op bop, [Reg Rcx; Reg Rbx]) in
         let i4 = (Movq, [Reg Rbx; lookup ctxt.layout uid]) in
         [i1; i2; i3; i4]
 
@@ -309,11 +309,15 @@ let compile_insn ctxt (uid, i) : X86.ins list =
           b @ [(Addq, [Imm (Lit (Int64.of_int var_on_stack)); Reg Rsp])]
         else
           b
-    | Bitcast (_, op, _) -> 
+          
+    | Bitcast (_, op, _) ->
         let i1 = (compile_operand ctxt Rax) op in
         let i2 = (Movq, [Reg Rax; lookup ctxt.layout uid]) in
         [i1; i2]
 
+    | Gep (ty, operand, operands) ->
+        compile_gep ctxt (ty, operand) operands
+    
     | _ -> []
   end
 
@@ -377,7 +381,8 @@ let compile_lbl_block lbl ctxt blk : elem =
    [ NOTE: the first six arguments are numbered 0 .. 5 ]
 *)
 let arg_loc (n : int) : operand =
-  match n + 1 with
+  let n = n + 1 in
+  match n with
     | 1 -> Reg Rdi
     | 2 -> Reg Rsi
     | 3 -> Reg Rdx
@@ -439,9 +444,11 @@ let stack_layout args (block, lbled_blocks) : layout =
 let emit (i: ins list ref) (b: ins) = 
   i := !i @ [b]
   
+
 let emits (i: ins list ref) (b: ins list) = 
   i := !i @ b
 
+  
 let compile_fdecl tdecls name { f_ty; f_param; f_cfg } =
   cur_func := name;
   clear_alloca ();
@@ -455,13 +462,13 @@ let compile_fdecl tdecls name { f_ty; f_param; f_cfg } =
   emit ins (Subq, [Imm (Lit (Int64.of_int (stack_len))); Reg Rsp]);    (* Subq $xx, %rsp *)
 
   (* save parameters to stack frame *)
-  let t1 idx name = 
+  let t1 idx name =
     let param_loc = arg_loc idx in
     let cur_frame_loc = List.assoc name layout in
 
     match param_loc with
       | Reg r -> emit ins (Movq, [param_loc; cur_frame_loc])
-      | _ -> 
+      | _ ->
           emit ins (Movq, [param_loc; Reg Rax]);
           emit ins (Movq, [Reg Rax; cur_frame_loc])
 
@@ -492,7 +499,7 @@ let compile_fdecl tdecls name { f_ty; f_param; f_cfg } =
   let exit_elem = [{lbl = exit_lable !cur_func; global = false; asm = (Text !ins);}] in
 
   entry_elem @ elems @ exit_elem
-;;
+
 
 
 
