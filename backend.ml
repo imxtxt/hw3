@@ -47,7 +47,21 @@ let clear_alloca () =
   alloca_name_ := org_name ^ "0"
 
 
-let exit_lable = ".exit"
+let exit_lable (u) = u^"exit"
+let cur_func = ref ""
+
+
+let x86_op_by_ll_op (b: Ll.bop) =
+  match b with
+    | Add -> Addq
+    | Sub -> Subq
+    | Mul -> Imulq
+    | Shl -> Shlq
+    | Lshr -> Shrq
+    | Ashr -> Sarq
+    | And -> Andq
+    | Or -> Orq
+    | Xor -> Xorq
 
 (* locals and layout -------------------------------------------------------- *)
 
@@ -116,16 +130,19 @@ let lookup m x = List.assoc x m
 *)
 let compile_operand ctxt dest : Ll.operand -> ins =
   function o ->
-    begin match o with
-      | Null -> (Movq, [Imm (Lit 0L); Reg dest])
-      | Const c -> (Movq, [Imm (Lit c); Reg dest])
-      | Gid g -> 
-          let g = Platform.mangle g in
-          (Leaq, [Imm (Lbl g); Reg dest])
-      | Id i ->
-          let i = lookup ctxt.layout i in
-          (Movq, [i; Reg dest])
-    end
+  begin match o with
+    | Null -> 
+        (Movq, [Imm (Lit 0L); Reg dest])
+    | Const c -> 
+        (Movq, [Imm (Lit c); Reg dest])
+    | Gid g -> 
+        let g = Platform.mangle g in
+        (Leaq, [Ind3 (Lbl g, Rsp); Reg dest])
+    | Id i ->
+        let i = lookup ctxt.layout i in
+        (Movq, [i; Reg dest])
+  end
+
 
 
 (* compiling call  ---------------------------------------------------------- *)
@@ -173,19 +190,8 @@ let compile_operand ctxt dest : Ll.operand -> ins =
      Your function should simply return 0 in those cases
 *)
 let rec size_ty tdecls t : int =
-  function o ->
-    begin match o with
-      | Null -> 
-          (Movq, [Imm (Lit 0L); Reg dest])
-      | Const c -> 
-          (Movq, [Imm (Lit c); Reg dest])
-      | Gid g -> 
-          let g = Platform.mangle g in
-          (Leaq, [Imm (Lbl g); Reg dest])
-      | Id i ->
-          let i = lookup ctxt.layout i in
-          (Movq, [i; Reg dest])
-    end
+failwith "size_ty not implemented"
+
 
 
 
@@ -215,19 +221,8 @@ let rec size_ty tdecls t : int =
       by the path so far
 *)
 let compile_gep ctxt (op : Ll.ty * Ll.operand) (path: Ll.operand list) : ins list =
-  function o ->
-    begin match o with
-      | Null -> 
-          (Movq, [Imm (Lit 0L); Reg dest])
-      | Const c -> 
-          (Movq, [Imm (Lit c); Reg dest])
-      | Gid g -> 
-          let g = Platform.mangle g in
-          (Leaq, [Imm (Lbl g); Reg dest])
-      | Id i ->
-          let i = lookup ctxt.layout i in
-          (Movq, [i; Reg dest])
-    end
+failwith "compile_gep not implemented"
+
 
 
 (* compiling instructions  -------------------------------------------------- *)
@@ -254,19 +249,74 @@ let compile_gep ctxt (op : Ll.ty * Ll.operand) (path: Ll.operand list) : ins lis
    - Bitcast: does nothing interesting at the assembly level
 *)
 let compile_insn ctxt (uid, i) : X86.ins list =
-  function o ->
-    begin match o with
-      | Null -> 
-          (Movq, [Imm (Lit 0L); Reg dest])
-      | Const c -> 
-          (Movq, [Imm (Lit c); Reg dest])
-      | Gid g -> 
-          let g = Platform.mangle g in
-          (Leaq, [Imm (Lbl g); Reg dest])
-      | Id i ->
-          let i = lookup ctxt.layout i in
-          (Movq, [i; Reg dest])
-    end
+  begin match i with
+    | Binop (bop, ty, src, dest) ->
+        let i1 = (compile_operand ctxt Rbx) src in
+        let i2 = (compile_operand ctxt Rax) dest in
+        let i3 = (x86_op_by_ll_op bop, [Reg Rax; Reg Rbx]) in
+        let i4 = (Movq, [Reg Rbx; lookup ctxt.layout uid]) in
+        [i1; i2; i3; i4]
+
+    | Icmp (cnd, ty, src, dest) ->
+        let i1 = (compile_operand ctxt Rax) src in
+        let i2 = (compile_operand ctxt Rbx) dest in
+        let i3 = (Cmpq, [Reg Rbx; Reg Rax]) in
+        let i4 = (Set (compile_cnd cnd), [Reg Rax]) in
+        let i5  = (Movq, [Reg Rax; lookup ctxt.layout uid]) in
+        [i1; i2; i3; i4; i5]
+
+    | Load (ty, opd) ->
+        let i1 = (compile_operand ctxt Rax) opd in
+        let i2 = (Movq, [Ind2 Rax; Reg Rax]) in
+        let i3 = (Movq, [Reg Rax; lookup ctxt.layout uid]) in
+        [i1; i2; i3]
+
+    | Store (ty, src, dest) ->
+        let i1 = (compile_operand ctxt Rbx) src in
+        let i2 = (compile_operand ctxt Rax) dest in
+        let i3 = (Movq, [Reg Rbx; Ind2 Rax]) in
+        [i1; i2; i3]
+
+    | Alloca ty ->
+        let a = alloca_name () in
+        let i1 = (Leaq, [lookup ctxt.layout a; Reg Rax]) in
+        let i2 = (Movq, [Reg Rax; lookup ctxt.layout uid]) in
+        [i1; i2]
+
+    | Call (ty, Gid name, param_list) ->
+        let param_reg = [|Rdi; Rsi; Rdx; Rcx; R08; R09|] in
+
+        let regg (i: int) (v: Ll.operand) =
+          if i < 6 then
+            [(compile_operand ctxt (Array.get param_reg i)) v]
+          else
+            let a = (compile_operand ctxt Rax) v in
+            let b = (Pushq, [Reg Rax]) in
+            [a; b]
+        in
+        let op_list = List.map snd param_list in
+        let inss = List.mapi regg op_list |> List.flatten in
+        let i1 = (Callq, [Imm (Lbl name)]) in
+        let b = match ty with
+          | Void -> inss @ [i1]
+          | _ -> 
+            let t = (Movq, [Reg Rax; lookup ctxt.layout uid]) in
+            inss @ [i1] @ [t]
+        in
+        let param_len = List.length param_list in
+        if param_len > 6 then
+          let var_on_stack = (param_len - 6) * 8 in
+          b @ [(Addq, [Imm (Lit (Int64.of_int var_on_stack)); Reg Rsp])]
+        else
+          b
+    | Bitcast (_, op, _) -> 
+        let i1 = (compile_operand ctxt Rax) op in
+        let i2 = (Movq, [Reg Rax; lookup ctxt.layout uid]) in
+        [i1; i2]
+
+    | _ -> []
+  end
+
 
 
 (* compiling terminators  --------------------------------------------------- *)
@@ -283,15 +333,15 @@ let compile_insn ctxt (uid, i) : X86.ins list =
 *)
 let compile_terminator ctxt t =
   match t with
-    | Ret (Void, _) -> [(Jmp, [Imm (Lbl exit_lable)])]
+    | Ret (Void, _) -> [(Jmp, [Imm (Lbl (exit_lable !cur_func))])]
 
     | Ret (t, o) -> 
         let o = match o with 
           | None -> raise Exit
           | Some a -> a
         in
-        let b = (compile_operand ctxt Rax) o in
-        [b; (Jmp, [Imm (Lbl exit_lable)])]
+        let b = o |> compile_operand ctxt Rax in
+        [b; (Jmp, [Imm (Lbl (exit_lable !cur_func))])]
 
     | Br b -> [(Jmp, [Imm (Lbl b)])]
 
@@ -356,12 +406,12 @@ let stack_layout args (block, lbled_blocks) : layout =
     match ins with
       | Store _  -> acc
       | Call (Void, _, _) -> acc
-      | Alloca _ -> 
+      | Alloca _ ->
           let x1 = [gen_off_operand (alloca_name ())] in
           let x2 = [gen_off_operand uid] in
           acc @ x1 @ x2
-      | _ -> 
-          let t1 = [gen_off_operand (alloca_name ())] in
+      | _ ->
+          let t1 = [gen_off_operand uid] in
           acc @ t1
   in
   let t3 b = List.fold_left t2 [] b.insns in
@@ -393,6 +443,7 @@ let emits (i: ins list ref) (b: ins list) =
   i := !i @ b
 
 let compile_fdecl tdecls name { f_ty; f_param; f_cfg } =
+  cur_func := name;
   clear_alloca ();
   let layout = stack_layout f_param f_cfg in
   let stack_len = 8 * List.length layout in
@@ -400,7 +451,7 @@ let compile_fdecl tdecls name { f_ty; f_param; f_cfg } =
 
   emit ins (Pushq, [Reg Rbp]);            (* pushq %rbp *)
   emit ins (Movq, [Reg Rsp; Reg Rbp]);    (* movq  $rsp, %rbp *)
-  emit ins (Pushq, [Reg Rbx]);            (* push callee-save register *)
+  (* emit ins (Pushq, [Reg Rbx]);            push callee-save register *)
   emit ins (Subq, [Imm (Lit (Int64.of_int (stack_len))); Reg Rsp]);    (* Subq $xx, %rsp *)
 
   (* save parameters to stack frame *)
@@ -418,7 +469,7 @@ let compile_fdecl tdecls name { f_ty; f_param; f_cfg } =
   List.iteri t1 f_param;
 
   (* compile entry block *)
-  clear_alloca ();  
+  clear_alloca ();
   let entry = fst f_cfg in
   let i = compile_block {tdecls ; layout} entry in     
   emits ins i;
@@ -428,17 +479,17 @@ let compile_fdecl tdecls name { f_ty; f_param; f_cfg } =
   (* compile other blocks *)
   let other_blocks = snd f_cfg in
   let t2 (l: lbl * block): elem = 
-    compile_lbl_block (fst l) {tdecls ; layout} other_blocks
+    compile_lbl_block (fst l) {tdecls ; layout} (snd l)
   in
   let elems = List.map t2 other_blocks in
 
   (* exit *)
   emit ins (Addq, [Imm (Lit (Int64.of_int stack_len)); Reg Rsp]);
-  emit ins (Popq, [Reg Rbx]); 
+  (* emit ins (Popq, [Reg Rbx]);  *)
   emit ins (Popq, [Reg Rbp]);
   emit ins (Retq, []);
 
-  let exit_elem = [{lbl = exit_lable; global = false; asm = (Text !ins);}] in
+  let exit_elem = [{lbl = exit_lable !cur_func; global = false; asm = (Text !ins);}] in
 
   entry_elem @ elems @ exit_elem
 ;;
