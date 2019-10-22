@@ -129,13 +129,13 @@ let lookup m x = List.assoc x m
    destination (usually a register).  
 *)
 let compile_operand ctxt dest : Ll.operand -> ins =
-  function o ->
+function o ->
   begin match o with
-    | Null -> 
+    | Null ->
         (Movq, [Imm (Lit 0L); Reg dest])
-    | Const c -> 
+    | Const c ->
         (Movq, [Imm (Lit c); Reg dest])
-    | Gid g -> 
+    | Gid g ->
         let g = Platform.mangle g in
         (Leaq, [Ind3 (Lbl g, Rip); Reg dest])
     | Id i ->
@@ -198,8 +198,13 @@ let rec size_ty (tdecls: (tid * ty) list) (t: ty) : int =
     | Ptr _ -> 8
     | Struct ty_list -> 
         let t1 x = size_ty tdecls x in
-        List.map t1 ty_list |> List.fold_left (+) 0 
-    | Array (len, ty) -> len * (size_ty tdecls ty)
+        List.map (t1) ty_list |> List.fold_left (+) 0 
+    | Array (len, ty) -> 
+        let t1 = match ty with
+                  | I8 -> 1
+                  | _ -> (size_ty tdecls ty)
+        in
+        len * t1
     | Fun _ -> 0
     | Namedt n -> size_ty tdecls (List.assoc n tdecls)
 
@@ -228,10 +233,76 @@ let rec size_ty (tdecls: (tid * ty) list) (t: ty) : int =
       in (4), but relative to the type f the sub-element picked out
       by the path so far
 *)
+
+(* 
+  %struct.RT = type { i8, [10 x [20 x i32]], i8 }
+  %struct.ST = type { i32, double, %struct.RT }
+
+  define i32* @foo(%struct.ST* %s) nounwind uwtable readnone optsize ssp {
+  entry:
+    %arrayidx = getelementptr inbounds %struct.ST* %s, i64 1, i32 2, i32 1, i64 5, i64 13
+    ret i32* %arrayidx
+  }
+*)
+
+(* 
+  Rax 
+  Rax = Rax + 1 * len (struct.ST)
+*)
+
+let operand_const (o: Ll.operand): int =
+  match o with
+    | Const c -> Int64.to_int c
+    | _ -> raise (Invalid_argument "t")
+
+    
+let rec real_type (tdecls : (tid * ty) list) (t: ty) = 
+  match t with
+    | Namedt n -> real_type tdecls (List.assoc n tdecls)
+    | _ -> t
+
 let compile_gep ctxt (op : Ll.ty * Ll.operand) (path: Ll.operand list) : ins list =
-failwith "compile_gep not implemented"
+  let iii (t: Ll.ty * (ins list)) (o: Ll.operand) =
+    let ty, ins = t in
+    match ty with
+    | Array (_, t) -> 
+        let i1 = (compile_operand ctxt Rbx) o in
+        let len = size_ty ctxt.tdecls t in
+        let i2 = (Imulq, [Imm (Lit (Int64.of_int len)); Reg Rbx]) in
+        let i3 = (Addq, [Reg Rbx; Reg Rax]) in
+        let ttype = real_type ctxt.tdecls t in
+        (ttype, ins @ [i1; i2; i3])
 
+    | Struct ty_list ->
+        let bias = operand_const o in
+        let ttt = Array.of_list ty_list in
+        let len = ref 0 in
 
+        for i = 0 to bias - 1  do
+          len := !len + size_ty ctxt.tdecls (Array.get ttt i)
+        done;
+
+        let i1 = (Addq, [Imm (Lit (Int64.of_int !len)); Reg Rax]) in
+        let ttype = real_type ctxt.tdecls (Array.get ttt bias) in
+
+        (ttype, ins @ [i1])
+
+    | _ -> t
+  in
+    
+  let t, o = op in
+
+  let i =  (compile_operand ctxt Rax) o in
+
+  let t = match t with
+    | Ptr p -> Array (10, p)
+    | _ -> raise (Invalid_argument "t")
+  in
+
+  let ttype = real_type ctxt.tdecls t in
+  let t = List.fold_left (iii) (ttype, [i]) path in
+
+  snd t
 
 (* compiling instructions  -------------------------------------------------- *)
 
@@ -307,7 +378,7 @@ let compile_insn ctxt (uid, i) : X86.ins list =
         let i1 = (Callq, [Imm (Lbl name)]) in
         let b = match ty with
           | Void -> inss @ [i1]
-          | _ -> 
+          | _ ->
             let t = (Movq, [Reg Rax; lookup ctxt.layout uid]) in
             inss @ [i1] @ [t]
         in
@@ -324,8 +395,10 @@ let compile_insn ctxt (uid, i) : X86.ins list =
         [i1; i2]
 
     | Gep (ty, operand, operands) ->
-        compile_gep ctxt (ty, operand) operands
-    
+        let i1 =  compile_gep ctxt (ty, operand) operands in
+        let i2 = (Movq, [Reg Rax; lookup ctxt.layout uid]) in
+        i1 @ [i2]
+      
     | _ -> []
   end
 
@@ -486,7 +559,7 @@ let compile_fdecl tdecls name { f_ty; f_param; f_cfg } =
   (* compile entry block *)
   clear_alloca ();
   let entry = fst f_cfg in
-  let i = compile_block {tdecls ; layout} entry in     
+  let i = compile_block {tdecls ; layout} entry in
   emits ins i;
   let entry_elem = [{lbl = name; global = true; asm = (Text !ins);}] in
   ins := [];
