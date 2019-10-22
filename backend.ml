@@ -198,8 +198,8 @@ let rec size_ty (tdecls: (tid * ty) list) (t: ty) : int =
     | Ptr _ -> 8
     | Struct ty_list -> 
         let t1 x = size_ty tdecls x in
-        List.map (t1) ty_list |> List.fold_left (+) 0 
-    | Array (len, ty) -> 
+        List.map (t1) ty_list |> List.fold_left (+) 0
+    | Array (len, ty) ->
         let t1 = match ty with
                   | I8 -> 1
                   | _ -> (size_ty tdecls ty)
@@ -261,6 +261,7 @@ let rec real_type (tdecls : (tid * ty) list) (t: ty) =
     | Namedt n -> real_type tdecls (List.assoc n tdecls)
     | _ -> t
 
+    
 let compile_gep ctxt (op : Ll.ty * Ll.operand) (path: Ll.operand list) : ins list =
   let iii (t: Ll.ty * (ins list)) (o: Ll.operand) =
     let ty, ins = t in
@@ -295,12 +296,11 @@ let compile_gep ctxt (op : Ll.ty * Ll.operand) (path: Ll.operand list) : ins lis
   let i =  (compile_operand ctxt Rax) o in
 
   let t = match t with
-    | Ptr p -> Array (10, p)
+    | Ptr p -> Array (0, p)
     | _ -> raise (Invalid_argument "t")
   in
 
-  let ttype = real_type ctxt.tdecls t in
-  let t = List.fold_left (iii) (ttype, [i]) path in
+  let t = List.fold_left (iii) (t, [i]) path in
 
   snd t
 
